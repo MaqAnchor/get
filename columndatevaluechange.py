@@ -22,10 +22,9 @@ def process_file(file_path):
                 {'Blank': '01-01-1900', 'Not Found': '01-01-1800'}
             )
 
-            # Save the updated CSV file
-            output_file = f"processed_{os.path.basename(file_path)}"
-            df.to_csv(output_file, index=False)
-            print(f"Processed file saved as: {output_file}")
+            # Save the updated CSV file, retaining the original filename
+            df.to_csv(file_path, index=False)
+            print(f"File successfully updated: {file_path}")
         else:
             print(f"'Last check-in Intune' column not found in {file_path}. Skipping file.")
 
