@@ -3,12 +3,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 def load_vulnerability_data(file_path):
-    """Load vulnerability dataset, handling multi-app machines."""
-    return pd.read_excel(file_path, sheet_name='QDS-above-70-crossed-40d').drop_duplicates()
+    """
+    Load and preprocess vulnerability dataset.
+    
+    Args:
+        file_path (str): Path to Excel file
+    
+    Returns:
+        pd.DataFrame: Processed vulnerability dataset
+    """
+    # Load dataset, drop duplicates, reset index
+    df = pd.read_excel(file_path, sheet_name='QDS-above-70-crossed-40d')
+    df = df.drop_duplicates(subset=['NetBIOS', 'Application'])
+    
+    return df
 
 def set_cover_algorithm(df, target_machines):
     """
-    Implement Set Cover Algorithm with multi-application machine tracking.
+    Implement Set Cover Algorithm with multi-application tracking.
     
     Args:
         df (pd.DataFrame): Vulnerability dataset
@@ -17,27 +29,29 @@ def set_cover_algorithm(df, target_machines):
     Returns:
         tuple: Selected applications and their coverage details
     """
-    # Group applications by coverage
-    machine_set = {row['NetBIOS']: set() for _, row in df.iterrows()}
-    for _, row in df.iterrows():
-        machine_set[row['NetBIOS']].add(row['Application'])
+    # Create machine-to-application mapping
+    machine_app_map = df.groupby('NetBIOS')['Application'].unique().to_dict()
     
-    app_machine_map = {}
+    # Count how many machines each application can fix
+    app_coverage = {}
     for app in df['Application'].unique():
-        machines_covered = {machine for machine, apps in machine_set.items() if app in apps}
-        app_machine_map[app] = len(machines_covered)
+        machines_covered = {machine for machine, apps in machine_app_map.items() if app in apps}
+        app_coverage[app] = len(machines_covered)
     
-    app_machine_map = pd.Series(app_machine_map).sort_values(ascending=False)
+    app_coverage = pd.Series(app_coverage).sort_values(ascending=False)
     
     selected_apps = []
-    uncovered_machines = set(machine_set.keys())
+    uncovered_machines = set(machine_app_map.keys())
     app_coverage_details = []
     
     while uncovered_machines and len(selected_apps) < len(df['Application'].unique()):
-        best_app = app_machine_map[~app_machine_map.index.isin(selected_apps)].idxmax()
+        # Select best uncovered application
+        best_app = app_coverage[~app_coverage.index.isin(selected_apps)].idxmax()
+        
+        # Find newly covered machines by this application
         newly_covered_machines = {
             machine for machine in uncovered_machines 
-            if best_app in machine_set[machine]
+            if best_app in machine_app_map[machine]
         }
         
         if newly_covered_machines:
@@ -45,15 +59,37 @@ def set_cover_algorithm(df, target_machines):
             app_coverage_details.append({
                 'Application': best_app,
                 'Machines Fixed': len(newly_covered_machines),
-                'Cumulative Machines': len(machine_set.keys()) - len(uncovered_machines) + len(newly_covered_machines)
+                'Cumulative Machines': len(set(machine_app_map.keys()) - uncovered_machines) + len(newly_covered_machines)
             })
             
             uncovered_machines -= newly_covered_machines
         
-        if len(uncovered_machines) <= target_machines:
+        # Stop if machines patched meet or exceed target
+        if len(machine_app_map.keys()) - len(uncovered_machines) >= target_machines:
             break
     
     return selected_apps, app_coverage_details
+
+def create_output_visualization(app_coverage_details):
+    """
+    Create horizontal bar chart of application coverage.
+    
+    Args:
+        app_coverage_details (list): Details of selected applications
+    
+    Returns:
+        matplotlib.figure.Figure: Visualization of application coverage
+    """
+    plt.figure(figsize=(12, 6))
+    apps = [detail['Application'] for detail in app_coverage_details]
+    machines_fixed = [detail['Machines Fixed'] for detail in app_coverage_details]
+    
+    plt.barh(apps, machines_fixed, color='skyblue', edgecolor='navy')
+    plt.xlabel('Number of Machines Fixed')
+    plt.title('Application Vulnerability Coverage')
+    plt.tight_layout()
+    
+    return plt
 
 def main():
     # Configuration
@@ -61,12 +97,38 @@ def main():
     target_machines = 140
     output_file = 'vulnerability_analysis_output.xlsx'
     
-    # Load data and run analysis
+    # Load and analyze data
     df = load_vulnerability_data(input_file)
     selected_apps, app_coverage_details = set_cover_algorithm(df, target_machines)
     
-    # Output generation remains the same as previous script
-    # ... [rest of the previous script remains unchanged]
+    # Create pivot table of applications and machines
+    app_machine_pivot = df.groupby('Application')['NetBIOS'].nunique().reset_index()
+    app_machine_pivot.columns = ['Application', 'Unique Machines']
+    
+    # Output to Excel
+    with pd.ExcelWriter(output_file) as writer:
+        df.to_excel(writer, sheet_name='Original Dataset', index=False)
+        app_machine_pivot.to_excel(writer, sheet_name='Application Machine Summary', index=False)
+        
+        coverage_df = pd.DataFrame(app_coverage_details)
+        coverage_df.to_excel(writer, sheet_name='Selected Applications', index=False)
+    
+    # Create and save visualization
+    plt = create_output_visualization(app_coverage_details)
+    plt.savefig('application_coverage.png')
+    plt.close()
+    
+    # Display summary
+    print("Set Cover Analysis Results:")
+    for detail in app_coverage_details:
+        print(f"Application: {detail['Application']}, "
+               f"Machines Fixed: {detail['Machines Fixed']}, "
+               f"Cumulative Machines: {detail['Cumulative Machines']}")
+    
+    final_coverage = app_coverage_details[-1]['Cumulative Machines']
+    print(f"\nTarget Machines: {target_machines}")
+    print(f"Total Machines Fixed: {final_coverage}")
+    print(f"Target Achieved: {final_coverage >= target_machines}")
 
 if __name__ == "__main__":
     main()
