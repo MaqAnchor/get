@@ -50,7 +50,7 @@ for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing rows"):
 
     # 1) Prefix-based exact match before colon
     if ":" in short_desc:
-        prefix = short_desc.split("\",1)[0].strip()
+        prefix = short_desc.split(":", 1)[0].strip()
         for app in app_list:
             if prefix.lower() == app.lower():
                 app_assigned = app
