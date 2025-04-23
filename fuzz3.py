@@ -17,7 +17,7 @@ import sys
 import os
 import time
 
-# ── allow user‐site installs without modifying PATH ──
+# ── allow user-site installs without modifying PATH ──
 user_site = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\site-packages")
 if os.path.isdir(user_site):
     sys.path.insert(0, user_site)
@@ -41,23 +41,21 @@ def normalize_columns(df):
     """
     Strip whitespace, lowercase all column names, then remap known keys to canonical names.
     """
-    # normalize all to lowercase & strip
     df = df.rename(columns=lambda c: c.strip().lower())
-    # map to canonical
     mapping = {
-        'short description': 'Short description',
-        'application': 'Application'
+        'short description': 'Short Description',
+        'application name': 'Application Name'
     }
     return df.rename(columns=mapping)
 
 
 def audit_conflicting_duplicates(df, sim_threshold=0.9):
     """
-    Prints pairs of descriptions with cosine similarity > threshold but different Application labels.
+    Prints pairs of descriptions with cosine similarity > threshold but different Application Name labels.
     """
     print(f"\n▶ Auditing for near-duplicates (sim > {sim_threshold}) with conflicting labels…")
-    texts = df['Short description'].astype(str).tolist()
-    apps = df['Application'].astype(str).tolist()
+    texts = df['Short Description'].astype(str).tolist()
+    apps = df['Application Name'].astype(str).tolist()
     tfidf = TfidfVectorizer(stop_words='english').fit_transform(texts)
     sims = cosine_similarity(tfidf)
     conflicts = []
@@ -92,8 +90,7 @@ def build_ml_pipeline():
 
 def rule_based_override(text):
     """
-    Return an Application if `text` matches a hard rule; else None.
-    Customize these rules for your domain.
+    Return an Application Name if `text` matches a hard rule; else None.
     """
     t = text.lower()
     if 'database' in t and 'backup' in t:
@@ -134,8 +131,8 @@ def main():
     # 1a) Audit for conflicts
     audit_conflicting_duplicates(df_train)
 
-    texts = df_train['Short description'].astype(str).tolist()
-    labels = df_train['Application'].astype(str).tolist()
+    texts = df_train['Short Description'].astype(str).tolist()
+    labels = df_train['Application Name'].astype(str).tolist()
 
     # 2) Train ML pipeline
     print('\n2) Training TF-IDF + LR pipeline...')
@@ -149,17 +146,17 @@ def main():
 
     # 4) Prompt & load new data
     fname = input("\n4) Enter Excel file to process (e.g. NewData.xlsx): ").strip()
-    print(f"   • Reading '{fname}' sheet 'Page 1'...")
-    df_new = pd.read_excel(fname, sheet_name='Page 1')
+    print(f"   • Reading '{fname}' sheet 'Page1'...")
+    df_new = pd.read_excel(fname, sheet_name='Page1')
     df_new = normalize_columns(df_new)
     print(f"   • Columns = {df_new.columns.tolist()}")
     print(f"   • {len(df_new)} rows to predict.\n")
 
     # 5) Hybrid prediction
     print('5) Predicting...')
-    proba = ml_pipeline.predict_proba(df_new['Short description'].astype(str))
+    proba = ml_pipeline.predict_proba(df_new['Short Description'].astype(str))
     predictions = []
-    for i, desc in enumerate(df_new['Short description'].astype(str)):
+    for i, desc in enumerate(df_new['Short Description'].astype(str)):
         # rule-based override
         rule = rule_based_override(desc)
         if rule:
@@ -178,14 +175,14 @@ def main():
     # 6) Insert & save
     flagged = predictions.count('REVIEW MANUALLY')
     print(f"   • Flagged for review = {flagged}")
-    idx = df_new.columns.get_loc('Short description')
-    df_new.insert(idx+1, 'Application', predictions)
-    out = fname.replace('.xlsx', '_with_Apps.xlsx')
-    df_new.to_excel(out, sheet_name='Page 1', index=False)
+    idx = df_new.columns.get_loc('Short Description')
+    df_new.insert(idx+1, 'Application Name', predictions)
+    out = fname.replace('.xlsx', '_with_ApplicationName.xlsx')
+    df_new.to_excel(out, sheet_name='Page1', index=False)
     print(f"\n6) Saved → {out}")
 
     # 7) Export low-confidence for manual labeling
-    review_df = df_new[df_new['Application']=='REVIEW MANUALLY']
+    review_df = df_new[df_new['Application Name']=='REVIEW MANUALLY']
     if not review_df.empty:
         review_df.to_excel('to_review.xlsx', index=False)
         print(f"   • Exported to_review.xlsx ({len(review_df)} rows)")
@@ -194,4 +191,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
