@@ -4,11 +4,11 @@ High-performance pipeline for auto-filling 'Application Name' from 'Short Descri
 optimized for large datasets (~60k+ rows):
 - Optional audit skip for speed
 - Column normalization
-- Fast HashingVectorizer features
-- SGDClassifier for scalable training
+- Fast HashingVectorizer features with reduced dimensionality
+- MultinomialNB for lightning-fast training
 - Batched sentence-transformers encoding
 - Approximate k-NN via NearestNeighbors
-- Vectorized predictions
+- Vectorized predictions with predict_proba
 - GUI file picker
 
 Prerequisites:
@@ -22,14 +22,14 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog
 
-# allow --user installs
+# allow --user installs in roaming profile
 user_site = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\site-packages")
 if os.path.isdir(user_site): sys.path.insert(0, user_site)
 scripts_dir = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\Scripts")
 if os.path.isdir(scripts_dir): sys.path.insert(0, scripts_dir)
 
 from sklearn.feature_extraction.text import HashingVectorizer
-from sklearn.linear_model import SGDClassifier
+from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.neighbors import NearestNeighbors
 from sentence_transformers import SentenceTransformer
@@ -37,11 +37,9 @@ from sentence_transformers import SentenceTransformer
 # —— Config ——
 SKIP_AUDIT = True          # disable duplicate audit for speed
 EMB_BATCH_SIZE = 256       # batch size for embedding encoding
-ML_MAX_ITER = 1000
-ML_LOSS = 'log'            # logistic regression via SGD
-ML_ALPHA = 1e-4            # regularization strength
 THR_ML = 0.60
 THR_EMB = 0.75
+HASH_BITS = 16             # features = 2**HASH_BITS (65k dims)
 
 # —— Helpers ——
 
@@ -51,14 +49,16 @@ def normalize_columns(df):
                'application name':  'Application Name'}
     return df.rename(columns=mapping)
 
-# fast feature pipeline using HashingVectorizer
+# fast feature pipeline using HashingVectorizer + MultinomialNB
 def build_ml_pipeline():
-    word_hash = HashingVectorizer(analyzer='word', ngram_range=(1,2), n_features=2**18)
-    char_hash = HashingVectorizer(analyzer='char_wb', ngram_range=(3,5), n_features=2**18)
+    dims = 2**HASH_BITS
+    word_hash = HashingVectorizer(analyzer='word', ngram_range=(1,2), n_features=dims, alternate_sign=False)
+    char_hash = HashingVectorizer(analyzer='char_wb', ngram_range=(3,5), n_features=dims, alternate_sign=False)
     feats = FeatureUnion([('w', word_hash), ('c', char_hash)], n_jobs=-1)
-    clf = SGDClassifier(loss=ML_LOSS, alpha=ML_ALPHA, max_iter=ML_MAX_ITER, tol=1e-3, n_jobs=-1)
+    clf = MultinomialNB()
     return Pipeline([('feats', feats), ('clf', clf)])
 
+# rule-based overrides for known patterns
 def rule_based_override(text):
     t = text.lower()
     if 'database' in t and 'backup' in t:
@@ -69,12 +69,11 @@ def rule_based_override(text):
 
 # batched embedding encoder
 def encode_batches(model, texts, batch_size=EMB_BATCH_SIZE):
-    embeddings = []
+    embs = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i+batch_size]
-        emb = model.encode(batch, normalize_embeddings=True)
-        embeddings.append(emb)
-    return np.vstack(embeddings)
+        embs.append(model.encode(batch, normalize_embeddings=True))
+    return np.vstack(embs)
 
 # —— Main ——
 
@@ -85,20 +84,21 @@ def main():
     df_train = normalize_columns(df_train)
     print(f'   • {len(df_train)} rows, cols: {df_train.columns.tolist()}')
 
+    # optional sampled audit skipped
     if not SKIP_AUDIT:
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
-        print('2) Auditing duplicates (sample)')
+        print('2) Sampling for duplicate audit...')
         sample = df_train.sample(n=min(len(df_train),1000), random_state=42)
         tfidf = TfidfVectorizer(stop_words='english').fit_transform(sample['Short Description'])
         sims = cosine_similarity(tfidf)
-        # skip detailed print for speed
+        # (conflicts omitted for speed)
 
-    # prepare texts & labels
+    # prepare data
     texts = df_train['Short Description'].astype(str).tolist()
-    labels= df_train['Application Name'].astype(str).tolist()
+    labels = df_train['Application Name'].astype(str).tolist()
 
-    print('2) Building and training ML pipeline...')
+    print('\n2) Building and training ML pipeline (MultinomialNB)...')
     ml_pipe = build_ml_pipeline()
     ml_pipe.fit(texts, labels)
 
@@ -108,7 +108,7 @@ def main():
     nn = NearestNeighbors(metric='cosine', algorithm='brute', n_jobs=-1)
     nn.fit(train_emb)
 
-    print('4) Select target file via GUI...')
+    print('\n4) Select target file via GUI...')
     root = tk.Tk(); root.withdraw()
     fname = filedialog.askopenfilename(filetypes=[('Excel','*.xlsx')])
     root.destroy()
@@ -124,25 +124,25 @@ def main():
     print('5) Encoding new texts and querying k-NN...')
     new_emb = encode_batches(emb_model, new_texts)
     dist, idx = nn.kneighbors(new_emb, n_neighbors=1)
-    sims = 1 - dist[:,0]
+    sims_emb = 1 - dist[:,0]
 
-    print('6) ML predictions')
-    ml_preds = ml_pipe.predict(new_texts)
-    # approximate confidence via decision_function (sigmoid approx)
-    try:
-        conf = ml_pipe.decision_function(new_texts)
-        ml_conf = 1/(1+np.exp(-conf)) if conf.ndim==1 else np.max(1/(1+np.exp(-conf)), axis=1)
-    except:
-        ml_conf = None
+    print('6) ML predict_proba for NB...')
+    ml_probs = ml_pipe.predict_proba(new_texts)
+    ml_preds = ml_pipe.classes_[np.argmax(ml_probs, axis=1)]
+    ml_conf  = ml_probs.max(axis=1)
 
     print('7) Merging rule, embedding, ML')
     results = []
     for i, desc in enumerate(new_texts):
         r = rule_based_override(desc)
-        if r: results.append(r); continue
-        if sims[i] >= THR_EMB: results.append(labels[idx[i,0]]); continue
-        if ml_conf is not None and ml_conf[i] < THR_ML: results.append('REVIEW MANUALLY')
-        else: results.append(ml_preds[i])
+        if r:
+            results.append(r); continue
+        if sims_emb[i] >= THR_EMB:
+            results.append(labels[idx[i,0]]); continue
+        if ml_conf[i] < THR_ML:
+            results.append('REVIEW MANUALLY')
+        else:
+            results.append(ml_preds[i])
 
     print('8) Inserting and saving results')
     df_new.insert(df_new.columns.get_loc('Short Description')+1,
