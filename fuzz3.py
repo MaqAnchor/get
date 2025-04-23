@@ -37,137 +37,161 @@ from sentence_transformers import SentenceTransformer
 
 # —— Helpers —— #
 
-def normalize_columns(df, mapping=None):
+def normalize_columns(df):
     """
-    Strip whitespace and unify casing in column names.
-    Optionally remap any variants via `mapping` dict.
+    Strip whitespace, lowercase all column names, then remap known keys to canonical names.
     """
-    df = df.rename(columns=lambda c: c.strip())
-    if mapping:
-        df = df.rename(columns=mapping)
-    return df
+    # normalize all to lowercase & strip
+    df = df.rename(columns=lambda c: c.strip().lower())
+    # map to canonical
+    mapping = {
+        'short description': 'Short description',
+        'application': 'Application'
+    }
+    return df.rename(columns=mapping)
+
 
 def audit_conflicting_duplicates(df, sim_threshold=0.9):
-    texts = df["Short description"].astype(str).tolist()
-    apps  = df["Application"].astype(str).tolist()
-    tfidf = TfidfVectorizer(stop_words="english").fit_transform(texts)
-    sims  = cosine_similarity(tfidf)
+    """
+    Prints pairs of descriptions with cosine similarity > threshold but different Application labels.
+    """
+    print(f"\n▶ Auditing for near-duplicates (sim > {sim_threshold}) with conflicting labels…")
+    texts = df['Short description'].astype(str).tolist()
+    apps = df['Application'].astype(str).tolist()
+    tfidf = TfidfVectorizer(stop_words='english').fit_transform(texts)
+    sims = cosine_similarity(tfidf)
     conflicts = []
     n = sims.shape[0]
     for i in range(n):
         for j in range(i+1, n):
-            if sims[i,j] > sim_threshold and apps[i] != apps[j]:
+            if sims[i, j] > sim_threshold and apps[i] != apps[j]:
                 conflicts.append((i, j, sims[i,j], texts[i], apps[i], apps[j]))
-    print(f"\n▶ Audit: {len(conflicts)} conflicts at sim>{sim_threshold}")
-    for i,j,s,txt,a,b in conflicts[:5]:
-        print(f"  • [{i}]≃[{j}] sim={s:.2f} → '{txt}'  labels: '{a}' vs '{b}'")
+    if not conflicts:
+        print("   ✔ No conflicting near-duplicates found.")
+    else:
+        print(f"   ⚠ Found {len(conflicts)} conflicting pairs; showing up to 5:")
+        for i, j, s, txt, a, b in conflicts[:5]:
+            print(f"     • [{i}]≃[{j}] sim={s:.2f} → '{txt}'  labels: '{a}' vs '{b}'")
+
 
 def build_ml_pipeline():
+    """
+    Combines word-level and character-level TF-IDF features, then LogisticRegression.
+    """
     word_ngram = TfidfVectorizer(
-        analyzer="word", stop_words="english",
+        analyzer='word', stop_words='english',
         ngram_range=(1,3), min_df=2
     )
     char_ngram = TfidfVectorizer(
-        analyzer="char_wb", ngram_range=(3,5), min_df=2
+        analyzer='char_wb', ngram_range=(3,5), min_df=2
     )
-    features = FeatureUnion([("word", word_ngram), ("char", char_ngram)])
-    return Pipeline([("features", features),
-                     ("clf", LogisticRegression(max_iter=1000))])
+    features = FeatureUnion([('word', word_ngram), ('char', char_ngram)])
+    clf = LogisticRegression(max_iter=1000)
+    return Pipeline([('features', features), ('clf', clf)])
+
 
 def rule_based_override(text):
+    """
+    Return an Application if `text` matches a hard rule; else None.
+    Customize these rules for your domain.
+    """
     t = text.lower()
-    if "database" in t and "backup" in t:
-        return "DBBackupApp"
-    if t.startswith("crm:"):
-        return "CRMSystem"
+    if 'database' in t and 'backup' in t:
+        return 'DBBackupApp'
+    if t.startswith('crm:'):
+        return 'CRMSystem'
     return None
+
 
 def build_embeddings_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
 
 def predict_with_embeddings(model, train_texts, train_labels, query, emb_threshold=0.75):
+    """
+    If the query's embedding has cosine similarity >= threshold with any training example,
+    return that example's label; else None.
+    """
     q_emb = model.encode([query], normalize_embeddings=True)
     t_emb = model.encode(train_texts, normalize_embeddings=True)
-    sims  = cosine_similarity(q_emb, t_emb)[0]
-    idx   = int(np.argmax(sims))
-    if sims[idx] >= emb_threshold:
-        return train_labels[idx]
+    sims = cosine_similarity(q_emb, t_emb)[0]
+    best_idx = int(np.argmax(sims))
+    if sims[best_idx] >= emb_threshold:
+        return train_labels[best_idx]
     return None
 
-# —— Main —— #
 
 def main():
     start = time.time()
 
     # 1) Load & normalize training data
-    print("1) Loading App.xlsx → Sheet1…")
-    df_train = pd.read_excel("App.xlsx", sheet_name="Sheet1")
-    col_map = {
-        # if your headers were e.g. 'short description' or ' Short description '
-        "short description":  "Short description",
-        "application":        "Application"
-    }
-    df_train = normalize_columns(df_train, mapping=col_map)
+    print('1) Loading App.xlsx → Sheet1...')
+    df_train = pd.read_excel('App.xlsx', sheet_name='Sheet1')
+    df_train = normalize_columns(df_train)
     print(f"   • Columns = {df_train.columns.tolist()}")
+    print(f"   • {len(df_train)} labeled rows loaded.")
 
-    # 1a) Audit for conflicting near-duplicates
+    # 1a) Audit for conflicts
     audit_conflicting_duplicates(df_train)
 
-    texts  = df_train["Short description"].astype(str).tolist()
-    labels = df_train["Application"].astype(str).tolist()
+    texts = df_train['Short description'].astype(str).tolist()
+    labels = df_train['Application'].astype(str).tolist()
 
-    # 2) Train enriched TF-IDF + LR
-    print("\n2) Training ML pipeline…")
+    # 2) Train ML pipeline
+    print('\n2) Training TF-IDF + LR pipeline...')
     ml_pipeline = build_ml_pipeline()
     ml_pipeline.fit(texts, labels)
+    print('   ✔ Model trained.')
 
-    # 3) Prepare embeddings model
-    print("3) Loading embeddings model…")
+    # 3) Load embeddings model
+    print('3) Loading embeddings model...')
     emb_model = build_embeddings_model()
 
     # 4) Prompt & load new data
     fname = input("\n4) Enter Excel file to process (e.g. NewData.xlsx): ").strip()
-    print(f"   • Reading '{fname}' sheet 'Page 1'…")
-    df_new = pd.read_excel(fname, sheet_name="Page 1")
-    df_new = normalize_columns(df_new, mapping=col_map)
+    print(f"   • Reading '{fname}' sheet 'Page 1'...")
+    df_new = pd.read_excel(fname, sheet_name='Page 1')
+    df_new = normalize_columns(df_new)
     print(f"   • Columns = {df_new.columns.tolist()}")
     print(f"   • {len(df_new)} rows to predict.\n")
 
     # 5) Hybrid prediction
-    print("5) Predicting…")
-    proba = ml_pipeline.predict_proba(df_new["Short description"].astype(str))
-    preds = []
-    for i, desc in enumerate(df_new["Short description"].astype(str)):
-        # (a) rule
+    print('5) Predicting...')
+    proba = ml_pipeline.predict_proba(df_new['Short description'].astype(str))
+    predictions = []
+    for i, desc in enumerate(df_new['Short description'].astype(str)):
+        # rule-based override
         rule = rule_based_override(desc)
         if rule:
-            preds.append(rule)
+            predictions.append(rule)
             continue
-        # (b) embeddings
-        emb_lbl = predict_with_embeddings(emb_model, texts, labels, desc)
-        if emb_lbl:
-            preds.append(emb_lbl)
+        # embeddings fallback
+        emb_label = predict_with_embeddings(emb_model, texts, labels, desc)
+        if emb_label:
+            predictions.append(emb_label)
             continue
-        # (c) ML + threshold
+        # ML + confidence threshold
         rowp = proba[i]
-        best = ml_pipeline.classes_[np.argmax(rowp)]
-        preds.append(best if rowp.max() >= 0.60 else "REVIEW MANUALLY")
+        top = ml_pipeline.classes_[np.argmax(rowp)]
+        predictions.append(top if rowp.max() >= 0.60 else 'REVIEW MANUALLY')
 
     # 6) Insert & save
-    print(f"   • Flagged = {preds.count('REVIEW MANUALLY')}")
-    idx = df_new.columns.get_loc("Short description")
-    df_new.insert(idx+1, "Application", preds)
-    out = fname.replace(".xlsx", "_with_Apps.xlsx")
-    df_new.to_excel(out, sheet_name="Page 1", index=False)
+    flagged = predictions.count('REVIEW MANUALLY')
+    print(f"   • Flagged for review = {flagged}")
+    idx = df_new.columns.get_loc('Short description')
+    df_new.insert(idx+1, 'Application', predictions)
+    out = fname.replace('.xlsx', '_with_Apps.xlsx')
+    df_new.to_excel(out, sheet_name='Page 1', index=False)
     print(f"\n6) Saved → {out}")
 
-    # 7) Export to-review
-    review = df_new[df_new["Application"]=="REVIEW MANUALLY"]
-    if not review.empty:
-        review.to_excel("to_review.xlsx", index=False)
-        print(f"   • to_review.xlsx ({len(review)} rows)")
+    # 7) Export low-confidence for manual labeling
+    review_df = df_new[df_new['Application']=='REVIEW MANUALLY']
+    if not review_df.empty:
+        review_df.to_excel('to_review.xlsx', index=False)
+        print(f"   • Exported to_review.xlsx ({len(review_df)} rows)")
 
-    print(f"\n✔ Done in {time.time()-start:.2f}s")
+    print(f"\n✔ Done in {time.time() - start:.2f}s!")
 
-if __name__=="__main__":
+if __name__ == '__main__':
     main()
+
