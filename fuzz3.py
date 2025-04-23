@@ -28,6 +28,8 @@ if os.path.isdir(scripts_dir):
 # now safe to import everything else
 import pandas as pd
 import numpy as np
+import tkinter as tk
+from tkinter import filedialog
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.pipeline import Pipeline, FeatureUnion
@@ -50,9 +52,6 @@ def normalize_columns(df):
 
 
 def audit_conflicting_duplicates(df, sim_threshold=0.9):
-    """
-    Prints pairs of descriptions with cosine similarity > threshold but different Application Name labels.
-    """
     print(f"\n▶ Auditing for near-duplicates (sim > {sim_threshold}) with conflicting labels…")
     texts = df['Short Description'].astype(str).tolist()
     apps = df['Application Name'].astype(str).tolist()
@@ -73,25 +72,14 @@ def audit_conflicting_duplicates(df, sim_threshold=0.9):
 
 
 def build_ml_pipeline():
-    """
-    Combines word-level and character-level TF-IDF features, then LogisticRegression.
-    """
-    word_ngram = TfidfVectorizer(
-        analyzer='word', stop_words='english',
-        ngram_range=(1,3), min_df=2
-    )
-    char_ngram = TfidfVectorizer(
-        analyzer='char_wb', ngram_range=(3,5), min_df=2
-    )
+    word_ngram = TfidfVectorizer(analyzer='word', stop_words='english', ngram_range=(1,3), min_df=2)
+    char_ngram = TfidfVectorizer(analyzer='char_wb', ngram_range=(3,5), min_df=2)
     features = FeatureUnion([('word', word_ngram), ('char', char_ngram)])
     clf = LogisticRegression(max_iter=1000)
     return Pipeline([('features', features), ('clf', clf)])
 
 
 def rule_based_override(text):
-    """
-    Return an Application Name if `text` matches a hard rule; else None.
-    """
     t = text.lower()
     if 'database' in t and 'backup' in t:
         return 'DBBackupApp'
@@ -105,10 +93,6 @@ def build_embeddings_model():
 
 
 def predict_with_embeddings(model, train_texts, train_labels, query, emb_threshold=0.75):
-    """
-    If the query's embedding has cosine similarity >= threshold with any training example,
-    return that example's label; else None.
-    """
     q_emb = model.encode([query], normalize_embeddings=True)
     t_emb = model.encode(train_texts, normalize_embeddings=True)
     sims = cosine_similarity(q_emb, t_emb)[0]
@@ -144,8 +128,15 @@ def main():
     print('3) Loading embeddings model...')
     emb_model = build_embeddings_model()
 
-    # 4) Prompt & load new data
-    fname = input("\n4) Enter Excel file to process (e.g. NewData.xlsx): ").strip()
+    # 4) GUI file picker for new data
+    print('\n4) Please select the target Excel file...')
+    root = tk.Tk()
+    root.withdraw()
+    fname = filedialog.askopenfilename(title='Select Excel file', filetypes=[('Excel files', '*.xlsx')])
+    root.destroy()
+    if not fname:
+        print('No file selected, exiting.')
+        return
     print(f"   • Reading '{fname}' sheet 'Page1'...")
     df_new = pd.read_excel(fname, sheet_name='Page1')
     df_new = normalize_columns(df_new)
@@ -157,17 +148,14 @@ def main():
     proba = ml_pipeline.predict_proba(df_new['Short Description'].astype(str))
     predictions = []
     for i, desc in enumerate(df_new['Short Description'].astype(str)):
-        # rule-based override
         rule = rule_based_override(desc)
         if rule:
             predictions.append(rule)
             continue
-        # embeddings fallback
         emb_label = predict_with_embeddings(emb_model, texts, labels, desc)
         if emb_label:
             predictions.append(emb_label)
             continue
-        # ML + confidence threshold
         rowp = proba[i]
         top = ml_pipeline.classes_[np.argmax(rowp)]
         predictions.append(top if rowp.max() >= 0.60 else 'REVIEW MANUALLY')
@@ -177,7 +165,7 @@ def main():
     print(f"   • Flagged for review = {flagged}")
     idx = df_new.columns.get_loc('Short Description')
     df_new.insert(idx+1, 'Application Name', predictions)
-    out = fname.replace('.xlsx', '_with_ApplicationName.xlsx')
+    out = os.path.splitext(fname)[0] + '_with_ApplicationName.xlsx'
     df_new.to_excel(out, sheet_name='Page1', index=False)
     print(f"\n6) Saved → {out}")
 
