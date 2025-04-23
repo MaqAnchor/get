@@ -37,39 +37,32 @@ if "TCS Group" not in df.columns:
     assign_idx = df.columns.get_loc("Assignment group")
     df.insert(assign_idx + 1, "TCS Group", "")
 
-# Build vectorized mappings
-# 1) Exact historic matches
-hist_map = hist_df.set_index('Short Description')['Application Name']
-df['Application Name'] = (
-    df['Short description']
-      .map(hist_map)
-      .fillna(''))
+# 1) Exact historic mapping using a dict to handle duplicates
+hist_map = hist_df.drop_duplicates(subset=['Short Description'], keep='first')
+               .set_index('Short Description')['Application Name']
+               .to_dict()
+df['Application Name'] = df['Short description']
+                              .map(hist_map)
+                              .fillna('')
 
-# 2) Substring-based historic matches: create regex of all keys sorted by length
+# 2) Substring-based historic matches for leftovers
 remaining = df['Application Name'] == ''
 if remaining.any():
-    sorted_keys = sorted(hist_map.index.astype(str), key=len, reverse=True)
+    sorted_keys = sorted(hist_map.keys(), key=len, reverse=True)
     pattern = r"(" + "|".join(re.escape(k) for k in sorted_keys) + r")"
-    extracted = (
-        df.loc[remaining, 'Short description']
-          .str.extract(pattern, flags=re.IGNORECASE)[0]
-    )
-    # Map extracted substrings back to application names
-    df.loc[remaining, 'Application Name'] = (
-        extracted.map(hist_map)
-                 .fillna('')
-    )
+    extracted = df.loc[remaining, 'Short description']
+                    .str.extract(pattern, flags=re.IGNORECASE)[0]
+    df.loc[remaining, 'Application Name'] = extracted.map(hist_map)
+                                            .fillna('')
 
-# 3) Default for any still unmatched
+# 3) Fill any still unmatched
 df['Application Name'] = df['Application Name'].replace('', 'Not Available')
 
-# TCS mapping: direct vectorized lookup
-tcs_map = tcs_df.set_index('TCS Incident Groups')['Team Name2']
-df['TCS Group'] = (
-    df['Assignment group']
-      .map(tcs_map)
-      .fillna('Not Found')
-)
+# TCS mapping: vectorized lookup
+tcs_map = tcs_df.set_index('TCS Incident Groups')['Team Name2'].to_dict()
+df['TCS Group'] = df['Assignment group']
+                     .map(tcs_map)
+                     .fillna('Not Found')
 
 # Save result to new file
 output_file = input_file.rsplit('.', 1)[0] + "_with_advanced_substring.xlsx"
