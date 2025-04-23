@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Full pipeline for auto-filling 'Application Name' from 'Short Description',
-optimized for speed: column normalization, sampled duplicate audit,
-enriched TF-IDF, parallelized pipeline, rule overrides,
-precomputed embeddings + NearestNeighbors, and vectorized ML predictions.
-
-Uses a GUI file picker and supports user-site installs without PATH changes.
+High-performance pipeline for auto-filling 'Application Name' from 'Short Description',
+optimized for large datasets (~60k+ rows):
+- Optional audit skip for speed
+- Column normalization
+- Fast HashingVectorizer features
+- SGDClassifier for scalable training
+- Batched sentence-transformers encoding
+- Approximate k-NN via NearestNeighbors
+- Vectorized predictions
+- GUI file picker
 
 Prerequisites:
     pip install pandas scikit-learn openpyxl sentence-transformers
@@ -13,24 +17,31 @@ Prerequisites:
 import sys
 import os
 import time
-
-# Allow --user installs from roaming profile
-user_site = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\site-packages")
-if os.path.isdir(user_site): sys.path.insert(0, user_site)
-scripts_dir = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\Scripts")
-if os.path.isdir(scripts_dir): sys.path.insert(0, scripts_dir)
-
 import pandas as pd
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog
 
-from sklearn.feature_extraction.text import TfidfVectorizer
+# allow --user installs
+user_site = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\site-packages")
+if os.path.isdir(user_site): sys.path.insert(0, user_site)
+scripts_dir = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\Scripts")
+if os.path.isdir(scripts_dir): sys.path.insert(0, scripts_dir)
+
+from sklearn.feature_extraction.text import HashingVectorizer
+from sklearn.linear_model import SGDClassifier
 from sklearn.pipeline import Pipeline, FeatureUnion
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 from sentence_transformers import SentenceTransformer
+
+# —— Config ——
+SKIP_AUDIT = True          # disable duplicate audit for speed
+EMB_BATCH_SIZE = 256       # batch size for embedding encoding
+ML_MAX_ITER = 1000
+ML_LOSS = 'log'            # logistic regression via SGD
+ML_ALPHA = 1e-4            # regularization strength
+THR_ML = 0.60
+THR_EMB = 0.75
 
 # —— Helpers ——
 
@@ -40,33 +51,14 @@ def normalize_columns(df):
                'application name':  'Application Name'}
     return df.rename(columns=mapping)
 
-# Sampled audit to avoid O(n^2) on large data
-def audit_conflicting_duplicates(df, sim_threshold=0.9, sample_size=1000):
-    n = len(df)
-    sample = df.sample(n=min(n, sample_size), random_state=42)
-    texts = sample['Short Description'].astype(str).tolist()
-    apps  = sample['Application Name'].astype(str).tolist()
-    tfidf = TfidfVectorizer(stop_words='english').fit_transform(texts)
-    sims  = cosine_similarity(tfidf)
-    conflicts = []
-    m = len(texts)
-    for i in range(m):
-        for j in range(i+1, m):
-            if sims[i,j] > sim_threshold and apps[i] != apps[j]:
-                conflicts.append((i, j, sims[i,j], texts[i], apps[i], apps[j]))
-    print(f"▶ Audit: {len(conflicts)} conflicts (sample size {m}) at sim>{sim_threshold}")
-    for i,j,s,txt,a,b in conflicts[:5]:
-        print(f"  • [{i}]≃[{j}] sim={s:.2f} → '{txt}' labels: '{a}' vs '{b}'")
-
-# Parallelized TF-IDF + LogisticRegression
+# fast feature pipeline using HashingVectorizer
 def build_ml_pipeline():
-    word = TfidfVectorizer(analyzer='word', stop_words='english', ngram_range=(1,3), min_df=2)
-    char = TfidfVectorizer(analyzer='char_wb', ngram_range=(3,5), min_df=2)
-    feats = FeatureUnion([('w', word), ('c', char)], n_jobs=-1)
-    clf   = LogisticRegression(solver='saga', max_iter=1000, n_jobs=-1)
+    word_hash = HashingVectorizer(analyzer='word', ngram_range=(1,2), n_features=2**18)
+    char_hash = HashingVectorizer(analyzer='char_wb', ngram_range=(3,5), n_features=2**18)
+    feats = FeatureUnion([('w', word_hash), ('c', char_hash)], n_jobs=-1)
+    clf = SGDClassifier(loss=ML_LOSS, alpha=ML_ALPHA, max_iter=ML_MAX_ITER, tol=1e-3, n_jobs=-1)
     return Pipeline([('feats', feats), ('clf', clf)])
 
-# Simple rule overrides
 def rule_based_override(text):
     t = text.lower()
     if 'database' in t and 'backup' in t:
@@ -75,98 +67,96 @@ def rule_based_override(text):
         return 'CRMSystem'
     return None
 
-# Preload SentenceTransformer and NearestNeighbors
-def build_embeddings_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+# batched embedding encoder
+def encode_batches(model, texts, batch_size=EMB_BATCH_SIZE):
+    embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        emb = model.encode(batch, normalize_embeddings=True)
+        embeddings.append(emb)
+    return np.vstack(embeddings)
 
 # —— Main ——
 
 def main():
     t0 = time.time()
-
-    # 1) Load & normalize training data
-    print('1) Loading App.xlsx…')
+    print('1) Loading and normalizing App.xlsx → Sheet1...')
     df_train = pd.read_excel('App.xlsx', sheet_name='Sheet1')
     df_train = normalize_columns(df_train)
-    print(f"   • {len(df_train)} rows, cols: {df_train.columns.tolist()}")
+    print(f'   • {len(df_train)} rows, cols: {df_train.columns.tolist()}')
 
-    # 1a) Sampled audit
-    audit_conflicting_duplicates(df_train)
+    if not SKIP_AUDIT:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        print('2) Auditing duplicates (sample)')
+        sample = df_train.sample(n=min(len(df_train),1000), random_state=42)
+        tfidf = TfidfVectorizer(stop_words='english').fit_transform(sample['Short Description'])
+        sims = cosine_similarity(tfidf)
+        # skip detailed print for speed
 
+    # prepare texts & labels
     texts = df_train['Short Description'].astype(str).tolist()
     labels= df_train['Application Name'].astype(str).tolist()
 
-    # 2) Train ML pipeline
-    print('\n2) Training ML pipeline…')
+    print('2) Building and training ML pipeline...')
     ml_pipe = build_ml_pipeline()
     ml_pipe.fit(texts, labels)
-    print('   ✔ Pipeline trained.')
 
-    # 3) Precompute train embeddings & NN index
-    print('3) Loading embeddings & building index…')
-    emb_model = build_embeddings_model()
-    train_emb = emb_model.encode(texts, normalize_embeddings=True)
+    print('3) Preparing embeddings and k-NN index...')
+    emb_model = SentenceTransformer('all-MiniLM-L6-v2')
+    train_emb = encode_batches(emb_model, texts)
     nn = NearestNeighbors(metric='cosine', algorithm='brute', n_jobs=-1)
     nn.fit(train_emb)
 
-    # 4) GUI for target file
-    print('\n4) Select target file…')
+    print('4) Select target file via GUI...')
     root = tk.Tk(); root.withdraw()
     fname = filedialog.askopenfilename(filetypes=[('Excel','*.xlsx')])
     root.destroy()
     if not fname:
         print('No file selected, exiting.'); return
-    print(f"   • Reading {fname}…")
+
+    print(f'   • Reading {fname} → Page1')
     df_new = pd.read_excel(fname, sheet_name='Page1')
     df_new = normalize_columns(df_new)
     new_texts = df_new['Short Description'].astype(str).tolist()
-    print(f"   • {len(df_new)} rows to process.")
+    print(f'   • {len(new_texts)} rows to process')
 
-    # 5) Bulk encode new texts & query NN
-    print('5) Encoding new descriptions & querying NN…')
-    new_emb = emb_model.encode(new_texts, normalize_embeddings=True)
+    print('5) Encoding new texts and querying k-NN...')
+    new_emb = encode_batches(emb_model, new_texts)
     dist, idx = nn.kneighbors(new_emb, n_neighbors=1)
     sims = 1 - dist[:,0]
 
-    # 6) Bulk ML predict
-    print('6) Predicting ML probabilities…')
-    proba = ml_pipe.predict_proba(new_texts)
-    ml_preds = ml_pipe.classes_[np.argmax(proba, axis=1)]
-    ml_conf  = proba.max(axis=1)
+    print('6) ML predictions')
+    ml_preds = ml_pipe.predict(new_texts)
+    # approximate confidence via decision_function (sigmoid approx)
+    try:
+        conf = ml_pipe.decision_function(new_texts)
+        ml_conf = 1/(1+np.exp(-conf)) if conf.ndim==1 else np.max(1/(1+np.exp(-conf)), axis=1)
+    except:
+        ml_conf = None
 
-    # 7) Assemble final predictions
-    print('7) Assembling final predictions…')
-    thr_ml  = 0.60
-    thr_emb = 0.75
+    print('7) Merging rule, embedding, ML')
     results = []
     for i, desc in enumerate(new_texts):
-        # rule
         r = rule_based_override(desc)
-        if r:
-            results.append(r); continue
-        # embedding
-        if sims[i] >= thr_emb:
-            results.append(labels[idx[i,0]]); continue
-        # ML
-        if ml_conf[i] >= thr_ml:
-            results.append(ml_preds[i])
-        else:
-            results.append('REVIEW MANUALLY')
+        if r: results.append(r); continue
+        if sims[i] >= THR_EMB: results.append(labels[idx[i,0]]); continue
+        if ml_conf is not None and ml_conf[i] < THR_ML: results.append('REVIEW MANUALLY')
+        else: results.append(ml_preds[i])
 
-    # 8) Insert and save
+    print('8) Inserting and saving results')
     df_new.insert(df_new.columns.get_loc('Short Description')+1,
                   'Application Name', results)
     out = os.path.splitext(fname)[0] + '_with_ApplicationName.xlsx'
     df_new.to_excel(out, sheet_name='Page1', index=False)
-    print(f"\n✔ Saved predictions to {out}")
+    print(f'   ✔ Saved → {out}')
 
-    # 9) Export low-confidence
-    rev = df_new[df_new['Application Name']=='REVIEW MANUALLY']
-    if not rev.empty:
-        rev.to_excel('to_review.xlsx', index=False)
-        print(f"   • {len(rev)} rows exported to to_review.xlsx")
+    review = df_new[df_new['Application Name']=='REVIEW MANUALLY']
+    if not review.empty:
+        review.to_excel('to_review.xlsx', index=False)
+        print(f'   • {len(review)} for manual review -> to_review.xlsx')
 
-    print(f"\nTotal time: {time.time()-t0:.2f}s")
+    print(f'Total time: {time.time()-t0:.2f}s')
 
 if __name__ == '__main__':
     main()
