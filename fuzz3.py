@@ -6,9 +6,27 @@ and low-confidence flagging.
 
 Prerequisites:
     pip install pandas scikit-learn openpyxl sentence-transformers
+
+
+
+This version prepends your user‐site install paths so you can import packages
+from your roaming profile without touching system PATH.
 """
 
+import sys
+import os
 import time
+
+# ── ensure user-installed packages are importable ──
+user_site = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\site-packages")
+if os.path.isdir(user_site):
+    sys.path.insert(0, user_site)
+
+scripts_dir = os.path.expanduser(r"~\AppData\Roaming\Python\Python312\Scripts")
+if os.path.isdir(scripts_dir):
+    sys.path.insert(0, scripts_dir)
+
+# now safe to import everything else
 import pandas as pd
 import numpy as np
 
@@ -133,9 +151,9 @@ def main():
 
     # -- Predict each row using hybrid strategy --
     print("5) Running hybrid prediction…")
-    ml_probs = None
+    ml_probs = ml_pipeline.predict_proba(df_new["Short description"].astype(str))
     predictions = []
-    for desc in df_new["Short description"].astype(str):
+    for idx, desc in enumerate(df_new["Short description"].astype(str)):
         # 5a) Rule-based?
         rule = rule_based_override(desc)
         if rule:
@@ -149,10 +167,6 @@ def main():
             continue
 
         # 5c) ML model + confidence threshold
-        if ml_probs is None:
-            ml_probs = ml_pipeline.predict_proba(df_new["Short description"].astype(str))
-        # find this row's index
-        idx = len(predictions)
         row_proba = ml_probs[idx]
         best_class = ml_pipeline.classes_[np.argmax(row_proba)]
         if row_proba.max() >= 0.60:
@@ -169,7 +183,6 @@ def main():
     print(f"\n6) Saving full predictions to '{out_name}'…")
     df_new.to_excel(out_name, sheet_name="Page 1", index=False)
 
-    # Export only the rows needing review
     review_df = df_new[df_new["Application"] == "REVIEW MANUALLY"]
     if not review_df.empty:
         review_name = "to_review.xlsx"
