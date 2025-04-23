@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 High-performance pipeline for auto-filling 'Application Name' from 'Short Description',
-optimized for large datasets (~60k+ rows):
-- Optional audit skip for speed
+optimized for large datasets (~60k+ rows). Supports on-the-fly model download for embeddings:
 - Column normalization
 - Fast HashingVectorizer features with reduced dimensionality
 - MultinomialNB for lightning-fast training
-- Batched sentence-transformers encoding
+- Batched sentence-transformers encoding with automatic download
 - Approximate k-NN via NearestNeighbors
 - Vectorized predictions with predict_proba
 - GUI file picker
@@ -40,6 +39,9 @@ EMB_BATCH_SIZE = 256       # batch size for embedding encoding
 THR_ML = 0.60
 THR_EMB = 0.75
 HASH_BITS = 16             # features = 2**HASH_BITS (65k dims)
+# Model name and local cache directory for embeddings
+MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
+CACHE_DIR = os.path.join(os.getcwd(), 'model_cache')
 
 # —— Helpers ——
 
@@ -75,6 +77,18 @@ def encode_batches(model, texts, batch_size=EMB_BATCH_SIZE):
         embs.append(model.encode(batch, normalize_embeddings=True))
     return np.vstack(embs)
 
+# load or download SentenceTransformer model
+def load_embedding_model():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        # attempt offline load
+        model = SentenceTransformer(MODEL_NAME, cache_folder=CACHE_DIR, local_files_only=True)
+    except Exception:
+        # fallback to download
+        print(f"Model not found locally, downloading {MODEL_NAME} to {CACHE_DIR}...")
+        model = SentenceTransformer(MODEL_NAME, cache_folder=CACHE_DIR)
+    return model
+
 # —— Main ——
 
 def main():
@@ -84,26 +98,16 @@ def main():
     df_train = normalize_columns(df_train)
     print(f'   • {len(df_train)} rows, cols: {df_train.columns.tolist()}')
 
-    # optional sampled audit skipped
-    if not SKIP_AUDIT:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-        print('2) Sampling for duplicate audit...')
-        sample = df_train.sample(n=min(len(df_train),1000), random_state=42)
-        tfidf = TfidfVectorizer(stop_words='english').fit_transform(sample['Short Description'])
-        sims = cosine_similarity(tfidf)
-        # (conflicts omitted for speed)
-
-    # prepare data
+    # Prepare data
     texts = df_train['Short Description'].astype(str).tolist()
-    labels = df_train['Application Name'].astype(str).tolist()
+    labels= df_train['Application Name'].astype(str).tolist()
 
     print('\n2) Building and training ML pipeline (MultinomialNB)...')
     ml_pipe = build_ml_pipeline()
     ml_pipe.fit(texts, labels)
 
-    print('3) Preparing embeddings and k-NN index...')
-    emb_model = SentenceTransformer('all-MiniLM-L6-v2')
+    print('3) Loading embeddings model (offline or download)...')
+    emb_model = load_embedding_model()
     train_emb = encode_batches(emb_model, texts)
     nn = NearestNeighbors(metric='cosine', algorithm='brute', n_jobs=-1)
     nn.fit(train_emb)
@@ -136,9 +140,11 @@ def main():
     for i, desc in enumerate(new_texts):
         r = rule_based_override(desc)
         if r:
-            results.append(r); continue
+            results.append(r)
+            continue
         if sims_emb[i] >= THR_EMB:
-            results.append(labels[idx[i,0]]); continue
+            results.append(labels[idx[i,0]])
+            continue
         if ml_conf[i] < THR_ML:
             results.append('REVIEW MANUALLY')
         else:
