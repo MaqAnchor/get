@@ -9,27 +9,13 @@ from rapidfuzz import process, fuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+import string
 
 # Start tracking execution time
 start_time = time.time()
 
 print("Starting Advanced Application Mapping Process...")
 print("-----------------------------------------------")
-
-# Initialize NLTK resources - download if needed
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.data.find('corpora/stopwords')
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    print("Downloading required NLTK resources...")
-    nltk.download('punkt')
-    nltk.download('stopwords')
-    nltk.download('wordnet')
 
 # Create a file picker dialog
 root = tk.Tk()
@@ -146,21 +132,43 @@ except Exception as e:
     print(f"Error building lookup dictionary: {e}")
     exact_match_dict = {}
 
-# Text preprocessing function for better matching
+# Define custom text preprocessing function without NLTK
 def preprocess_text(text):
     if not isinstance(text, str) or pd.isna(text):
         return ""
     
-    # Tokenize and lowercase
-    tokens = word_tokenize(text.lower())
+    # Convert to lowercase
+    text = text.lower()
     
-    # Remove stopwords and punctuation
-    stop_words = set(stopwords.words('english'))
-    tokens = [token for token in tokens if token.isalnum() and token not in stop_words]
+    # Remove punctuation
+    translator = str.maketrans('', '', string.punctuation)
+    text = text.translate(translator)
     
-    # Lemmatize
-    lemmatizer = WordNetLemmatizer()
-    tokens = [lemmatizer.lemmatize(token) for token in tokens]
+    # Simple tokenization by whitespace
+    tokens = text.split()
+    
+    # Remove common English stopwords (manually defined)
+    common_stopwords = {
+        'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", 
+        "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 
+        'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 
+        'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 
+        'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 
+        'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 
+        'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 
+        'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 
+        'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 
+        'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 
+        'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 
+        'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 
+        'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 
+        'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 
+        'now', 'd', 'll', 'm', 'o', 're', 've', 'y'
+    }
+    tokens = [token for token in tokens if token not in common_stopwords]
+    
+    # Remove very short tokens (likely not meaningful)
+    tokens = [token for token in tokens if len(token) > 1]
     
     return " ".join(tokens)
 
@@ -188,10 +196,15 @@ except Exception as e:
 print("\nPerforming substring matching for remaining blanks...")
 substring_match_count = 0
 try:
-    # Create a list of patterns to look for
-    patterns = list(exact_match_dict.keys())
-    # Escape special regex characters and filter out non-string or null values
-    escaped_patterns = [re.escape(p) for p in patterns if isinstance(p, str) and pd.notna(p)]
+    # Create a list of patterns to look for (longer patterns first for better matching)
+    patterns = sorted(
+        [p for p in exact_match_dict.keys() if isinstance(p, str) and pd.notna(p)],
+        key=len,
+        reverse=True
+    )
+    
+    # Escape special regex characters
+    escaped_patterns = [re.escape(p) for p in patterns]
     
     # Create one big regex pattern with all possible matches
     combined_pattern = '|'.join(f'({p})' for p in escaped_patterns)
@@ -217,8 +230,8 @@ try:
 except Exception as e:
     print(f"Error during substring matching: {e}")
 
-# Step 6c: For remaining blanks, use advanced semantic matching
-print("\nPerforming advanced semantic matching for remaining blanks...")
+# Step 6c: For remaining blanks, use TF-IDF semantic matching
+print("\nPerforming TF-IDF semantic matching for remaining blanks...")
 semantic_match_count = 0
 try:
     # Get remaining blank rows
@@ -227,14 +240,19 @@ try:
     
     # Only proceed if we have blank rows and reference data
     if not blank_rows.empty and preprocessed_values:
-        # Create TF-IDF vectorizer
-        vectorizer = TfidfVectorizer(min_df=1)
+        # Create TF-IDF vectorizer with custom parameters for better matching
+        vectorizer = TfidfVectorizer(
+            min_df=1,            # Include all terms, even if they appear only once
+            ngram_range=(1, 3),  # Consider unigrams, bigrams, and trigrams
+            analyzer='word',     # Analyze at the word level
+            max_features=5000    # Limit features to prevent memory issues
+        )
         
         # Fit the vectorizer on our preprocessed reference texts
         tfidf_matrix = vectorizer.fit_transform(preprocessed_values)
         
         # Define threshold for TF-IDF cosine similarity
-        TFIDF_THRESHOLD = 0.65  # Adjust as needed based on testing
+        TFIDF_THRESHOLD = 0.4  # Adjust as needed based on testing
         
         for i, row in blank_rows.iterrows():
             short_desc = row.get('Short description')
@@ -242,73 +260,73 @@ try:
                 # Preprocess the query text
                 preprocessed_query = preprocess_text(short_desc)
                 
-                # Vectorize the query
-                query_vector = vectorizer.transform([preprocessed_query])
-                
-                # Calculate cosine similarity with all reference texts
-                cosine_similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
-                
-                # Get the best match
-                best_match_index = cosine_similarities.argmax()
-                best_match_score = cosine_similarities[best_match_index]
-                
-                if best_match_score >= TFIDF_THRESHOLD:
-                    # Map to application name using the original key
-                    original_key = original_keys[best_match_index]
-                    page1_df.at[i, 'Application Name'] = exact_match_dict[original_key]
-                    semantic_match_count += 1
-                else:
-                    # Try RapidFuzz as a fallback
-                    # This combines token set ratio with partial ratio for better matching
-                    match, score, _ = process.extractOne(
-                        short_desc,
-                        original_keys,
-                        scorer=lambda x, y: (fuzz.token_set_ratio(x, y) + fuzz.partial_ratio(x, y)) / 2
-                    )
+                if preprocessed_query:  # Only proceed if we have text after preprocessing
+                    # Vectorize the query
+                    query_vector = vectorizer.transform([preprocessed_query])
                     
-                    FUZZY_THRESHOLD = 80  # Threshold for the combined score
-                    if score >= FUZZY_THRESHOLD:
-                        page1_df.at[i, 'Application Name'] = exact_match_dict[match]
+                    # Calculate cosine similarity with all reference texts
+                    cosine_similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
+                    
+                    # Get the best match
+                    best_match_index = cosine_similarities.argmax()
+                    best_match_score = cosine_similarities[best_match_index]
+                    
+                    if best_match_score >= TFIDF_THRESHOLD:
+                        # Map to application name using the original key
+                        original_key = original_keys[best_match_index]
+                        page1_df.at[i, 'Application Name'] = exact_match_dict[original_key]
                         semantic_match_count += 1
-                    else:
-                        # Still no good match
-                        page1_df.at[i, 'Application Name'] = "Not Available"
         
-        print(f"Applied {semantic_match_count} semantic matches")
+        print(f"Applied {semantic_match_count} TF-IDF semantic matches")
     else:
         print("No blank rows to process or no reference data available")
 except Exception as e:
-    print(f"Error during semantic matching: {e}")
-    print("Falling back to basic fuzzy matching...")
+    print(f"Error during TF-IDF semantic matching: {e}")
+    print(f"Error details: {str(e)}")
+
+# Step 6d: For still remaining blanks, use enhanced RapidFuzz matching
+print("\nPerforming enhanced fuzzy matching for remaining blanks...")
+fuzzy_match_count = 0
+try:
+    # Get remaining blank rows
+    blank_app_mask = page1_df['Application Name'] == ""
+    blank_rows = page1_df[blank_app_mask]
     
-    # Fallback to basic fuzzy matching if semantic matching fails
-    try:
-        fuzzy_match_count = 0
-        # Get remaining blank rows again in case some were filled
-        blank_app_mask = page1_df['Application Name'] == ""
-        blank_rows = page1_df[blank_app_mask]
+    # Define multiple scoring strategies
+    def hybrid_score(s1, s2):
+        # Weighted average of multiple scoring methods
+        token_set = fuzz.token_set_ratio(s1, s2)        # Good for word-level similarity regardless of order
+        partial = fuzz.partial_ratio(s1, s2)           # Good for substring matching
+        token_sort = fuzz.token_sort_ratio(s1, s2)     # Good for same words in different order
         
-        for i, row in blank_rows.iterrows():
-            short_desc = row.get('Short description')
-            if pd.notna(short_desc) and isinstance(short_desc, str):
-                # Get the best match
+        # Custom hybrid score weighted toward token_set
+        return (0.5 * token_set) + (0.3 * partial) + (0.2 * token_sort)
+    
+    # Define fuzzy match threshold 
+    FUZZY_THRESHOLD = 75  # Match score must be at least 75%
+    
+    for i, row in blank_rows.iterrows():
+        short_desc = row.get('Short description')
+        if pd.notna(short_desc) and isinstance(short_desc, str):
+            valid_keys = [k for k in exact_match_dict.keys() if isinstance(k, str) and pd.notna(k)]
+            
+            if valid_keys:  # Only proceed if we have valid keys
+                # Get the best match using our hybrid scorer
                 match_result = process.extractOne(
-                    short_desc,
-                    [k for k in exact_match_dict.keys() if isinstance(k, str) and pd.notna(k)],
-                    scorer=fuzz.token_set_ratio
+                    short_desc, 
+                    valid_keys,
+                    scorer=hybrid_score
                 )
                 
                 if match_result:
                     match, score, _ = match_result
-                    FALLBACK_THRESHOLD = 75
-                    if score >= FALLBACK_THRESHOLD:
+                    if score >= FUZZY_THRESHOLD:
                         page1_df.at[i, 'Application Name'] = exact_match_dict[match]
                         fuzzy_match_count += 1
-        
-        print(f"Applied {fuzzy_match_count} fallback fuzzy matches")
-        semantic_match_count = fuzzy_match_count  # Update count for the summary
-    except Exception as e:
-        print(f"Error during fallback fuzzy matching: {e}")
+    
+    print(f"Applied {fuzzy_match_count} enhanced fuzzy matches above threshold {FUZZY_THRESHOLD}%")
+except Exception as e:
+    print(f"Error during enhanced fuzzy matching: {e}")
 
 # Step 7: Fill any remaining gaps with "Not Available"
 print("\nFilling remaining gaps...")
@@ -373,7 +391,8 @@ print("\n-----------------------------------------------")
 print("Summary of Application Name Mapping:")
 print(f"  - Exact matches: {exact_match_count}")
 print(f"  - Substring matches: {substring_match_count}")
-print(f"  - Semantic matches: {semantic_match_count}")
+print(f"  - TF-IDF semantic matches: {semantic_match_count}")
+print(f"  - Enhanced fuzzy matches: {fuzzy_match_count}")
 print(f"  - Not Available entries: {remaining_count}")
 print(f"  - Total rows processed: {original_row_count}")
 
