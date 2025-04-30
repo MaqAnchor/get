@@ -1,0 +1,12 @@
+TCSGroup = 
+VAR Result = LOOKUPVALUE(
+    abcGroups[Team Name2],
+    abcGroups[abc Incident Groups],
+    Incidents[Assigned to]
+)
+RETURN 
+IF(
+    OR(ISBLANK(Result), Result = 0),
+    "Non-abcGroups",
+    Result
+)
